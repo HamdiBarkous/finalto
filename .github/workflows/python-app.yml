@@ -1,0 +1,69 @@
+name: Python Application CI
+
+on:
+  push:
+    branches: [ "main", "master" ] # Catches pushes to either main or master
+  pull_request:
+    branches: [ "main", "master" ] # Catches PRs targeting either main or master
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.9", "3.10", "3.11"] # Test against multiple Python versions
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4 # Updated to v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4 # Updated to v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install Poetry
+      run: |
+        pipx install poetry~=1.7 # Using pipx for isolated install, pinned to a recent series
+        # Add poetry to PATH for subsequent steps
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+      # Alternative using curl (if pipx is not preferred or available easily)
+      # run: |
+      #   curl -sSL https://install.python-poetry.org | python3 - --version 1.7.1 # Pin specific version
+      #   echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Configure Poetry
+      run: |
+        poetry config virtualenvs.create true --local # Ensure virtualenv is created in .venv
+        poetry config virtualenvs.in-project true --local # Ensure .venv is in project root
+
+    - name: Install dependencies using Poetry
+      run: |
+        poetry install --no-interaction --no-ansi # --no-root is generally for libraries, not apps
+                                                 # --no-ansi for cleaner logs
+      # Cache Poetry virtualenv to speed up subsequent runs
+    - name: Cache Poetry virtualenv
+      uses: actions/cache@v3 # v3 is current as of late 2023
+      with:
+        path: .venv # Path to Poetry's virtualenv directory (if configured locally)
+        key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}-${{ matrix.python-version }}
+        restore-keys: |
+          ${{ runner.os }}-poetry-${{ matrix.python-version }}-
+
+    - name: Run tests
+      run: |
+        poetry run python -m unittest discover -s tests
+
+    - name: Check code formatting (using Black as an example - optional)
+      # This step is optional, but good practice. Assumes Black is in dev dependencies.
+      # If you add Black: poetry add black --group dev
+      # run: |
+      #   poetry run black --check .
+      if: success() # Only run if previous steps succeeded
+
+    - name: Run linter (using Flake8 as an example - optional)
+      # This step is optional. Assumes Flake8 is in dev dependencies.
+      # If you add Flake8: poetry add flake8 --group dev
+      # run: |
+      #   poetry run flake8 .
+      if: success() # Only run if previous steps succeeded

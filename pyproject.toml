@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "finalto-trade-executor"
+version = "0.1.0"
+description = "FIX Protocol Trade Executor application for Finalto"
+authors = ["Your Name <you@example.com>"] # Placeholder, can be updated by user
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.8"
+simplefix = "*" # Specify version constraint as needed, e.g., "^1.0.17"
+
+[tool.poetry.dev-dependencies]
+# Add development dependencies here if any, e.g.:
+# pytest = "^7.0"
+# coverage = "^6.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

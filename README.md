@@ -1,5 +1,7 @@
 # FIX Protocol Trade Executor (FIXNA)
 
+![CI Status](https://github.com/YOUR_USERNAME/YOUR_REPOSITORY/actions/workflows/python-app.yml/badge.svg)
+
 ## Overview/Description
 
 FIXNA (FIX NATIVE Application) is a Python-based application designed to connect to a Financial Information eXchange (FIX) protocol API for trade execution. It manages FIX sessions, sends trade orders, processes execution reports, and handles order cancellations. The application is configurable through an INI file and provides comprehensive logging.
@@ -43,8 +45,8 @@ The project is organized into the following main directories:
 
 ## Prerequisites
 
-*   Python 3.x (developed with Python 3.7+)
-*   `simplefix` library: A Python library for creating and parsing FIX messages.
+*   Python 3.x (Python 3.8 or higher is recommended, as specified in `pyproject.toml`).
+*   Poetry: A tool for dependency management and packaging in Python.
 
 ## Setup & Installation
 
@@ -55,17 +57,26 @@ The project is organized into the following main directories:
     cd fixna-trading-app 
     ```
 
-2.  **Install Dependencies:**
-    The primary external dependency is `simplefix`.
+2.  **Install Poetry:**
+    If you don't have Poetry installed, you can install it by following the official instructions at [https://python-poetry.org/docs/#installation](https://python-poetry.org/docs/#installation).
+    A common method is:
     ```bash
-    pip install simplefix
+    pip install poetry
     ```
-    If a `requirements.txt` file is provided in the future, you can use:
+    Or, for a more isolated installation:
     ```bash
-    pip install -r requirements.txt
+    curl -sSL https://install.python-poetry.org | python3 -
     ```
+    Ensure Poetry's bin directory is in your system's PATH.
 
-3.  **Set Up Configuration:**
+3.  **Install Project Dependencies:**
+    Navigate to the project root directory (where `pyproject.toml` is located) and run:
+    ```bash
+    poetry install
+    ```
+    This will create a virtual environment (if one doesn't exist for the project) and install all dependencies, including `simplefix`.
+
+4.  **Set Up Configuration:**
     The application requires a `config.ini` file to run.
     *   Navigate to the `config/` directory.
     *   Copy the example configuration file:
@@ -79,30 +90,32 @@ The project is organized into the following main directories:
 
 ## Running the Application
 
-To start the FIXNA trading application:
+To start the FIXNA trading application using Poetry's managed environment:
 
 ```bash
-python -m src.main
+poetry run python -m src.main
 ```
-or from the project root:
+Alternatively, you can activate the virtual environment first and then run the application:
 ```bash
-python src/main.py
+poetry shell
+python -m src.main
+# exit (to deactivate the shell)
 ```
 
 **Note:** Ensure that a FIX server is running, accessible from the machine where you run the application, and that your `config.ini` settings match the server's requirements.
 
 ## Running Tests
 
-To discover and run all unit tests located in the `tests/` directory:
+To discover and run all unit tests located in the `tests/` directory using Poetry:
 
 ```bash
-python -m unittest discover -s tests
+poetry run python -m unittest discover -s tests
 ```
 You can also run individual test files:
 ```bash
-python -m unittest tests.test_fix_client 
+poetry run python -m unittest tests.test_fix_client 
 # or
-python tests/test_fix_client.py
+poetry run python tests/test_fix_client.py
 ```
 
 ## Configuration Details (`config.ini`)
