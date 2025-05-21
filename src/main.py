@@ -80,7 +80,12 @@ def main():
         port=settings.fix_port,
         sender_comp_id=settings.fix_sender_comp_id,
         target_comp_id=settings.fix_target_comp_id,
-        heartbeat_interval=settings.fix_heartbeat_interval
+        heartbeat_interval=settings.fix_heartbeat_interval,
+        use_ssl=settings.fix_use_ssl,
+        ssl_ca_certs=settings.fix_ssl_ca_certs,
+        ssl_client_cert=settings.fix_ssl_client_cert,
+        ssl_client_key=settings.fix_ssl_client_key,
+        seq_num_file_path=settings.app_seq_num_file_path # Pass the sequence number file path
     )
     
     # --- 3. Initialize Trade Executor (if used directly in main) ---

@@ -3,64 +3,224 @@ import socket
 import datetime
 import time
 import logging
+import ssl
+import os
 
 # Get a logger for this module
 logger = logging.getLogger(__name__)
 
 class FixClient:
-    def __init__(self, host, port, sender_comp_id, target_comp_id, heartbeat_interval=30):
+    def __init__(self, host, port, sender_comp_id, target_comp_id, 
+                 heartbeat_interval=30, use_ssl=False, 
+                 ssl_ca_certs=None, ssl_client_cert=None, ssl_client_key=None,
+                 seq_num_file_path=None): # New parameter
         self.host = host
         self.port = port
         self.sender_comp_id = sender_comp_id
         self.target_comp_id = target_comp_id
-        self.sock = None
+        self.heartbeat_interval = heartbeat_interval
+        
+        self.use_ssl = use_ssl
+        self.ssl_ca_certs = ssl_ca_certs
+        self.ssl_client_cert = ssl_client_cert
+        self.ssl_client_key = ssl_client_key
+        
+        self.seq_num_file_path = seq_num_file_path # Store the path
+
+        self.sock = None 
         self.parser = simplefix.FixParser()
+        
+        # Initialize sequence numbers, then attempt to load them
         self.outgoing_seq_num = 1
-        self.incoming_seq_num = 1 # Expected incoming sequence number
+        self.incoming_seq_num = 1 
+        self._load_sequence_numbers() # Load sequence numbers during initialization
+
         self.session_active = False
-        self.heartbeat_interval = heartbeat_interval # Configurable heartbeat interval
         self.last_sent_time = time.time()
         self.last_received_time = time.time()
         self.test_request_id = 0
-        self.message_handlers = {} # For registering external handlers
+        self.message_handlers = {} 
+        
+        log_ssl_mode = "SSL/TLS" if self.use_ssl else "plain TCP"
         logger.info(f"FixClient initialized for {sender_comp_id} -> {target_comp_id} on {host}:{port} "
-                    f"with Heartbeat: {heartbeat_interval}s")
+                    f"({log_ssl_mode}), Heartbeat: {heartbeat_interval}s. "
+                    f"SeqNumFile: '{self.seq_num_file_path if self.seq_num_file_path else 'Not set'}'. "
+                    f"Initial Outgoing: {self.outgoing_seq_num}, Incoming: {self.incoming_seq_num}")
+        if self.use_ssl:
+            logger.info(f"  SSL Config: CA Certs='{self.ssl_ca_certs}', Client Cert='{self.ssl_client_cert}', Client Key='{self.ssl_client_key}'")
+
+    def _load_sequence_numbers(self):
+        if not self.seq_num_file_path:
+            logger.info("Sequence number file path not configured. Starting with default sequence numbers (1,1).")
+            return
+
+        if os.path.exists(self.seq_num_file_path):
+            try:
+                with open(self.seq_num_file_path, 'r') as f:
+                    content = f.read().strip()
+                    if not content: # File is empty
+                        logger.warning(f"Sequence number file '{self.seq_num_file_path}' is empty. Using defaults (1,1).")
+                        self.outgoing_seq_num = 1
+                        self.incoming_seq_num = 1
+                        return
+
+                    parts = content.split(',')
+                    if len(parts) == 2:
+                        incoming_str, outgoing_str = parts[0], parts[1]
+                        # Validate that parts are integers
+                        if not incoming_str.isdigit() or not outgoing_str.isdigit():
+                            raise ValueError("Sequence numbers are not valid integers.")
+                        
+                        self.incoming_seq_num = int(incoming_str)
+                        self.outgoing_seq_num = int(outgoing_str)
+                        logger.info(f"Successfully loaded sequence numbers from '{self.seq_num_file_path}': "
+                                    f"Incoming={self.incoming_seq_num}, Outgoing={self.outgoing_seq_num}")
+                    else:
+                        raise ValueError("File format is incorrect. Expected 'incoming,outgoing'.")
+            except (IOError, ValueError) as e:
+                logger.error(f"Error loading sequence numbers from '{self.seq_num_file_path}': {e}. "
+                             "Starting with default sequence numbers (1,1).", exc_info=True)
+                self.outgoing_seq_num = 1
+                self.incoming_seq_num = 1
+            except Exception as e: # Catch any other unexpected error during load
+                logger.error(f"Unexpected error loading sequence numbers from '{self.seq_num_file_path}': {e}. "
+                             "Starting with default sequence numbers (1,1).", exc_info=True)
+                self.outgoing_seq_num = 1
+                self.incoming_seq_num = 1
+        else:
+            logger.info(f"Sequence number file '{self.seq_num_file_path}' not found. "
+                        "Starting with default sequence numbers (1,1). Will create file on graceful shutdown.")
+            self.outgoing_seq_num = 1
+            self.incoming_seq_num = 1
+            
+    def _save_sequence_numbers(self):
+        if not self.seq_num_file_path:
+            logger.debug("Sequence number file path not configured. Cannot save sequence numbers.")
+            return
+
+        try:
+            # Ensure directory exists (AppSettings might have already done this, but good to be robust)
+            dir_name = os.path.dirname(self.seq_num_file_path)
+            if dir_name and not os.path.exists(dir_name):
+                os.makedirs(dir_name, exist_ok=True)
+                logger.info(f"Created directory for sequence number file: {dir_name}")
+
+            with open(self.seq_num_file_path, 'w') as f:
+                f.write(f"{self.incoming_seq_num},{self.outgoing_seq_num}")
+            logger.info(f"Successfully saved sequence numbers to '{self.seq_num_file_path}': "
+                        f"Incoming={self.incoming_seq_num}, Outgoing={self.outgoing_seq_num}")
+        except IOError as e:
+            logger.error(f"Error saving sequence numbers to '{self.seq_num_file_path}': {e}", exc_info=True)
+        except Exception as e: # Catch any other unexpected error during save
+            logger.error(f"Unexpected error saving sequence numbers to '{self.seq_num_file_path}': {e}", exc_info=True)
 
 
     def connect(self):
-        """Establishes a TCP connection to the FIX server."""
+        """Establishes a TCP connection to the FIX server, optionally wrapping with SSL/TLS."""
         try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.connect((self.host, self.port))
-            logger.info(f"Successfully connected to FIX server at {self.host}:{self.port}")
+            plain_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            plain_socket.connect((self.host, self.port))
+            logger.info(f"Successfully established plain TCP connection to {self.host}:{self.port}")
+
+            if self.use_ssl:
+                logger.info(f"Attempting to wrap socket with SSL/TLS for connection to {self.host}:{self.port}")
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                context.check_hostname = False # Default for client, usually True for server_hostname
+                context.verify_mode = ssl.CERT_NONE # Default, override below if CA specified
+
+                if self.ssl_ca_certs:
+                    if not os.path.exists(self.ssl_ca_certs):
+                        logger.error(f"SSL Error: CA certificate file '{self.ssl_ca_certs}' not found.")
+                        plain_socket.close()
+                        return False
+                    try:
+                        context.load_verify_locations(cafile=self.ssl_ca_certs)
+                        context.verify_mode = ssl.CERT_REQUIRED
+                        context.check_hostname = True # Required if verifying server cert
+                        logger.info(f"SSL: CA certs loaded from '{self.ssl_ca_certs}'. Server hostname and cert will be verified.")
+                    except ssl.SSLError as e:
+                        logger.error(f"SSL Error loading CA certs from '{self.ssl_ca_certs}': {e}", exc_info=True)
+                        plain_socket.close()
+                        return False
+                else:
+                    logger.warning("SSL: No CA certificate provided (ssl_ca_certs not set). Server certificate will not be verified against a specific CA.")
+                    # For self-signed certs or if not verifying against specific CA, but still want encryption:
+                    # context.check_hostname = False
+                    # context.verify_mode = ssl.CERT_NONE # Or ssl.CERT_OPTIONAL
+
+                if self.ssl_client_cert and self.ssl_client_key:
+                    if not os.path.exists(self.ssl_client_cert) or not os.path.exists(self.ssl_client_key):
+                        logger.error(f"SSL Error: Client certificate '{self.ssl_client_cert}' or key '{self.ssl_client_key}' not found.")
+                        plain_socket.close()
+                        return False
+                    try:
+                        context.load_cert_chain(certfile=self.ssl_client_cert, keyfile=self.ssl_client_key)
+                        logger.info(f"SSL: Client certificate and key loaded from '{self.ssl_client_cert}' and '{self.ssl_client_key}'.")
+                    except ssl.SSLError as e:
+                        logger.error(f"SSL Error loading client cert/key: {e}", exc_info=True)
+                        plain_socket.close()
+                        return False
+                elif self.ssl_client_cert or self.ssl_client_key: # Only one is provided
+                    logger.warning("SSL: Client certificate and key must both be provided if client authentication is intended. Proceeding without client cert.")
+
+                try:
+                    # server_hostname should match the CN or SAN in the server's certificate if check_hostname is True
+                    self.sock = context.wrap_socket(plain_socket, server_hostname=self.host if context.check_hostname else None)
+                    logger.info(f"SSL/TLS handshake successful. Secure connection established to {self.host}:{self.port}")
+                    # Log cipher, TLS version etc.
+                    logger.info(f"SSL Cipher: {self.sock.cipher()}, TLS Version: {self.sock.version()}")
+
+                except ssl.SSLError as e: # Covers various SSL errors including handshake issues
+                    logger.error(f"SSL handshake failed when connecting to {self.host}:{self.port}: {e}", exc_info=True)
+                    plain_socket.close() # Ensure the underlying socket is closed
+                    self.sock = None
+                    return False
+            else: # Not using SSL
+                self.sock = plain_socket
+            
             self.last_sent_time = time.time()
             self.last_received_time = time.time()
             return True
+            
         except socket.error as e:
-            logger.error(f"Error connecting to FIX server {self.host}:{self.port}: {e}", exc_info=True)
+            logger.error(f"Socket error connecting to FIX server {self.host}:{self.port}: {e}", exc_info=True)
+            if 'plain_socket' in locals() and plain_socket.fileno() != -1:
+                 plain_socket.close()
+            self.sock = None
+            return False
+        except Exception as e: # Catch any other unexpected errors during connect
+            logger.error(f"Unexpected error during connect to {self.host}:{self.port}: {e}", exc_info=True)
+            if 'plain_socket' in locals() and plain_socket.fileno() != -1:
+                 plain_socket.close()
             self.sock = None
             return False
 
+
     def _send_raw_message(self, message_bytes):
         """Sends raw bytes over the socket and updates last sent time."""
+        # This method should use self.sock which is now the (potentially wrapped) socket
         if not self.sock:
-            logger.error("Cannot send raw message: Not connected.")
+            logger.error("Cannot send raw message: Not connected (socket is None).")
             return False
         try:
-            self.sock.sendall(message_bytes)
+            self.sock.sendall(message_bytes) # Use self.sock directly
             self.last_sent_time = time.time()
             logger.debug(f"RawSent: {message_bytes.decode(errors='replace')}")
             return True
         except socket.error as e:
-            logger.error(f"Error sending raw message: {e}", exc_info=True)
-            # Consider session disconnect here if send fails critically
-            self.disconnect() # Or a more nuanced error handling
+            logger.error(f"Socket error sending raw message: {e}", exc_info=True)
+            self.disconnect() 
+            return False
+        except Exception as e: # Catch other errors like broken pipe if not covered by socket.error
+            logger.error(f"Unexpected error sending raw message: {e}", exc_info=True)
+            self.disconnect()
             return False
 
     def send_message(self, message, is_admin=False):
         """Encodes and sends a simplefix.FixMessage object."""
+        # This method should use self.sock which is now the (potentially wrapped) socket
         if not self.sock:
-            logger.error("Cannot send FIX message: Not connected.")
+            logger.error("Cannot send FIX message: Not connected (socket is None).")
             return False
 
         # Standard Header
@@ -84,29 +244,40 @@ class FixClient:
         logger.error(f"Failed to send MsgType {msg_type} (SeqNum {self.outgoing_seq_num -1}) due to _send_raw_message failure.")
         return False
 
-    def logon(self):
+    def logon(self, reset_seq_num_flag=False): # Added reset_seq_num_flag parameter
         """Sends a Logon (35=A) message."""
-        if not self.sock:
-            logger.warning("Cannot send Logon: Not connected.")
+        if not self.sock: # Check if connected first
+            logger.warning("Cannot send Logon: Not connected (socket is None).")
             return False
             
         logon_msg = simplefix.FixMessage()
         logon_msg.append_pair(35, "A") # MsgType: Logon
-        logon_msg.append_pair(98, 0)  # EncryptMethod: None
+        logon_msg.append_pair(98, 0)  # EncryptMethod: None (0 means no encryption)
         logon_msg.append_pair(108, self.heartbeat_interval)  # HeartBtInt
-        # Optional: ResetSeqNumFlag (141) could be added if needed, e.g., Y to reset sequence numbers
-        # logon_msg.append_pair(141, "Y") 
 
-        logger.info(f"Attempting Logon with HeartbeatInterval={self.heartbeat_interval}s")
+        if reset_seq_num_flag:
+            logon_msg.append_pair(141, "Y") # ResetSeqNumFlag: Yes
+            logger.info(f"Attempting Logon with ResetSeqNumFlag=Y and HeartbeatInterval={self.heartbeat_interval}s.")
+        else:
+            logger.info(f"Attempting Logon with HeartbeatInterval={self.heartbeat_interval}s.")
+            # Optionally, explicitly send 141=N if that's required by your counterparty when not resetting.
+            # logon_msg.append_pair(141, "N") 
+
+
         if self.send_message(logon_msg, is_admin=True):
-            # Session becomes active only after receiving Logon confirmation from server
-            # self.session_active = True # Tentatively set to active, confirm with server Logon
+            if reset_seq_num_flag:
+                logger.info("Logon with ResetSeqNumFlag=Y sent. Resetting client sequence numbers to 1,1.")
+                self.outgoing_seq_num = 1 # As per spec, client resets its own outgoing after sending 141=Y
+                self.incoming_seq_num = 1 # Server is also expected to reset its outgoing (our incoming) to 1
+                self._save_sequence_numbers() # Persist reset numbers
             logger.info("Logon message sent successfully.")
+            # Session becomes active only after receiving Logon confirmation from server.
             return True
+        
         logger.error("Failed to send Logon message.")
         return False
 
-    def logout(self):
+    def logout(self, text="Client requested logout"): # Added optional text parameter
         """Sends a Logout (35=5) message."""
         if not self.session_active:
             logger.warning("Cannot send Logout: Session not active.")
@@ -115,12 +286,13 @@ class FixClient:
         logout_msg = simplefix.FixMessage()
         logout_msg.append_pair(35, "5") # MsgType: Logout
         # Optional: Text (58) for reason for logout
-        # logout_msg.append_pair(58, "Client requested logout")
+        if text:
+            logout_msg.append_pair(58, text)
         
-        logger.info("Attempting Logout.")
+        logger.info(f"Attempting Logout with text: '{text}'.")
         if self.send_message(logout_msg, is_admin=True):
             logger.info("Logout message sent successfully.")
-            # self.session_active = False # Mark session as inactive after server confirms or timeout
+            # Session becomes inactive after server confirms logout or on disconnect.
             return True
         logger.error("Failed to send Logout message.")
         return False
@@ -149,9 +321,13 @@ class FixClient:
             finally:
                 self.sock = None
                 self.session_active = False # Ensure session is marked inactive
-                logger.info(f"Session for {self.sender_comp_id} is now INACTIVE. Outgoing seq num reset to 1, Incoming to 1.")
-                self.outgoing_seq_num = 1 # Reset sequence numbers for a new session
-                self.incoming_seq_num = 1
+                # Save sequence numbers on disconnect, as this is a form of session end.
+                self._save_sequence_numbers() 
+                logger.info(f"Session for {self.sender_comp_id} is now INACTIVE. "
+                            f"Current Outgoing: {self.outgoing_seq_num}, Incoming: {self.incoming_seq_num} (saved).")
+                # Sequence numbers are NOT reset to 1 on every disconnect, only on explicit reset or new session.
+                # self.outgoing_seq_num = 1 
+                # self.incoming_seq_num = 1
         else:
             logger.info("Already disconnected or socket not initialized.")
 
@@ -246,17 +422,21 @@ class FixClient:
                 logger.error(f"FATAL: Received message with sequence number ({msg_seq_num}) lower than expected ({self.incoming_seq_num}) "
                                f"and PossDupFlag (43) not set. This is a serious error. Disconnecting.")
                 self.send_logout(text=f"FATAL: Received out of order sequence number {msg_seq_num}, expected {self.incoming_seq_num}")
-                self.disconnect()
+                self.disconnect() # This will call _save_sequence_numbers
             return
         elif msg_seq_num > self.incoming_seq_num:
             logger.warning(f"Sequence gap detected. Expected {self.incoming_seq_num}, got {msg_seq_num}. Sending ResendRequest.")
             self.send_resend_request(self.incoming_seq_num, msg_seq_num -1) # Request from expected to one before received
             # Do not increment self.incoming_seq_num yet, wait for gap fill.
+            # Do not save sequence numbers here as the gap is being handled.
             return 
 
         # If msg_seq_num == self.incoming_seq_num, process and increment
         self.incoming_seq_num = msg_seq_num + 1
         logger.debug(f"Incoming sequence number now expected: {self.incoming_seq_num}")
+        # Consider saving sequence numbers here if high frequency of updates is desired,
+        # but it can be costly. For now, we save on logout/disconnect.
+        # self._save_sequence_numbers() 
 
 
         if msg_type == "A": # Logon
@@ -287,7 +467,7 @@ class FixClient:
             text_reason = message.get_value(58)
             logger.info(f"Logout (35=5) confirmation received from server. Reason: '{text_reason if text_reason else 'N/A'}'")
             self.session_active = False # Server confirmed logout
-            self.disconnect() # Close connection as server acknowledged logout
+            self.disconnect() # This will also call _save_sequence_numbers()
 
         elif msg_type == "0": # Heartbeat
             logger.info("Heartbeat (35=0) received from server.")
@@ -521,17 +701,19 @@ class FixClient:
         pass
 
     # Placeholder for persisting sequence numbers
-    def persist_sequence_numbers(self):
-        """Placeholder for saving sequence numbers to disk."""
-        logger.info("Persisting sequence numbers not implemented. Current outgoing: {self.outgoing_seq_num}, incoming: {self.incoming_seq_num}")
-        # Typically, save self.outgoing_seq_num and self.incoming_seq_num to a file or database.
-        pass
+    # Placeholder for persisting sequence numbers - now implemented as _save_sequence_numbers
+    # def persist_sequence_numbers(self):
+    #     """Placeholder for saving sequence numbers to disk."""
+    #     logger.info("Persisting sequence numbers not implemented. Current outgoing: {self.outgoing_seq_num}, incoming: {self.incoming_seq_num}")
+    #     # Typically, save self.outgoing_seq_num and self.incoming_seq_num to a file or database.
+    #     pass
 
-    def load_sequence_numbers(self):
-        """Placeholder for loading sequence numbers from disk."""
-        logger.info("Loading sequence numbers not implemented. Using defaults (1,1).")
-        # Load sequence numbers and potentially set ResetSeqNumFlag(141)=Y in Logon if numbers are reset.
-        pass
+    # Placeholder for loading sequence numbers - now implemented as _load_sequence_numbers
+    # def load_sequence_numbers(self):
+    #     """Placeholder for loading sequence numbers from disk."""
+    #     logger.info("Loading sequence numbers not implemented. Using defaults (1,1).")
+    #     # Load sequence numbers and potentially set ResetSeqNumFlag(141)=Y in Logon if numbers are reset.
+    #     pass
 
     def register_message_handler(self, msg_type, handler_callback):
         """Registers a callback function for a specific message type."""

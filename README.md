@@ -19,6 +19,8 @@ FIXNA (FIX NATIVE Application) is a Python-based application designed to connect
 *   Sends `NewOrderSingle` (35=D) messages for Market and Limit orders.
 *   Receives and processes `ExecutionReport` (35=8) messages to track order status.
 *   Sends `OrderCancelRequest` (35=F) and handles `OrderCancelReject` (35=9) messages.
+*   SSL/TLS encryption for secure communication (configurable).
+*   Persistent storage of FIX sequence numbers across sessions.
 *   Highly configurable via an INI file (`config/config.ini`).
 *   Comprehensive logging to both console and a specified log file.
 *   Unit tests for core components (`AppSettings`, `FixClient`, `TradeExecutor`).
@@ -84,9 +86,10 @@ The project is organized into the following main directories:
         cp config.example.ini config.ini
         ```
     *   Edit `config/config.ini` with your specific FIX server details and preferences. Key fields include:
-        *   `[FIX_SERVER]`: `Host`, `Port`, `SenderCompID`, `TargetCompID`, `HeartbeatIntervalSeconds`.
+        *   `[FIX_SERVER]`: `Host`, `Port`, `SenderCompID`, `TargetCompID`, `HeartbeatIntervalSeconds`, SSL settings, and sequence number file path (see "Configuration Details" below).
         *   `[ACCOUNT]`: `Username`, `Password` (these might be optional depending on your FIX server's requirements).
         *   `[APPLICATION]`: `LogLevel`, `LogFile`.
+    *   The application will attempt to create directories for log files and sequence number files if they do not exist, but ensure appropriate write permissions for the application's runtime environment.
 
 ## Running the Application
 
@@ -103,6 +106,15 @@ python -m src.main
 ```
 
 **Note:** Ensure that a FIX server is running, accessible from the machine where you run the application, and that your `config.ini` settings match the server's requirements.
+
+### Resetting Sequence Numbers
+
+To reset FIX sequence numbers to 1 for both incoming and outgoing messages, you can start the application with the `RESET_SEQNUM` environment variable set to `true`:
+
+```bash
+RESET_SEQNUM=true poetry run python -m src.main
+```
+This will send the `ResetSeqNumFlag(141)=Y` in the Logon message and update the persistent sequence number file accordingly. Use this with caution and only when coordinated with your FIX counterparty.
 
 ## Running Tests
 
@@ -128,6 +140,16 @@ The `config.ini` file is structured into sections:
     *   `SenderCompID`: Your FIX SenderCompID.
     *   `TargetCompID`: The FIX server's TargetCompID.
     *   `HeartbeatIntervalSeconds`: The heartbeat interval (in seconds) to be proposed to the server during Logon. The server may override this.
+    *   **SSL/TLS Configuration:**
+        *   `UseSSL`: Set to `true` to enable SSL/TLS encryption for the FIX connection, or `false` (default) for a plain TCP connection.
+        *   `CACertFile`: (Optional) Path to the Certificate Authority (CA) certificate file (e.g., `/path/to/ca.pem`). If provided, the server's certificate will be verified against this CA.
+        *   `ClientCertFile`: (Optional) Path to the client's SSL certificate file (e.g., `/path/to/client_cert.pem`). Used for client-side authentication if required by the server.
+        *   `ClientKeyFile`: (Optional) Path to the client's SSL private key file (e.g., `/path/to/client_key.key`). Must be provided if `ClientCertFile` is used.
+        *   *Paths can be absolute or relative to the project root.*
+    *   **Sequence Number Configuration:**
+        *   `SeqNumFilePath`: Path to the file where incoming and outgoing sequence numbers will be stored (e.g., `data/sequence_numbers.dat`). Default is `data/sequence_numbers.dat`.
+        *   The application loads sequence numbers from this file at startup and saves the latest numbers upon graceful disconnection or when a sequence reset is performed.
+        *   The directory for this file (e.g., `data/`) will be created automatically if it doesn't exist.
 
 *   **`[ACCOUNT]`**:
     *   `Username`: Username for FIX session authentication (if required by the server).
@@ -152,9 +174,7 @@ The `config.ini` file is structured into sections:
 
 ## Future Enhancements (Potential)
 
-*   **SSL/TLS Encryption:** Secure the FIX connection using SSL/TLS.
 *   **Automatic Reconnection:** Implement robust logic for automatically reconnecting if the FIX session drops.
-*   **Persistent Sequence Numbers:** Store and retrieve FIX sequence numbers across application restarts to ensure session continuity.
 *   **More Advanced Order Types:** Support for other order types beyond Market and Limit (e.g., Stop, StopLimit).
 *   **Order Modification:** Implement `OrderCancelReplaceRequest` (35=G).
 *   **Expanded FIX Message Support:** Handle a wider range of administrative and application-level FIX messages.

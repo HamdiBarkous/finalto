@@ -61,6 +61,24 @@ class AppSettings:
         self.fix_target_comp_id = self.get_setting('FIX_SERVER', 'TargetCompID', required=True)
         self.fix_heartbeat_interval = self.get_int_setting('FIX_SERVER', 'HeartbeatIntervalSeconds', fallback=30)
 
+        # SSL/TLS settings for FIX_SERVER
+        self.fix_use_ssl = self.get_boolean_setting('FIX_SERVER', 'UseSSL', fallback=False)
+        self.fix_ssl_ca_certs = self.get_setting('FIX_SERVER', 'CACertFile', fallback=None)
+        self.fix_ssl_client_cert = self.get_setting('FIX_SERVER', 'ClientCertFile', fallback=None)
+        self.fix_ssl_client_key = self.get_setting('FIX_SERVER', 'ClientKeyFile', fallback=None)
+        
+        # Validate optional SSL paths if UseSSL is true but specific files are expected
+        if self.fix_use_ssl:
+            # If CACertFile is specified, it should exist (basic check, real check in FixClient)
+            if self.fix_ssl_ca_certs and not os.path.exists(self.fix_ssl_ca_certs):
+                logger.warning(f"UseSSL is true, but CACertFile '{self.fix_ssl_ca_certs}' not found. SSL may fail if it's required.")
+            # If ClientCertFile is specified, ClientKeyFile should also be specified, and vice-versa
+            if bool(self.fix_ssl_client_cert) != bool(self.fix_ssl_client_key):
+                logger.warning("UseSSL is true, but ClientCertFile and ClientKeyFile must both be provided if one is specified.")
+            elif self.fix_ssl_client_cert and (not os.path.exists(self.fix_ssl_client_cert) or not os.path.exists(self.fix_ssl_client_key)):
+                 logger.warning(f"UseSSL is true, but ClientCertFile ('{self.fix_ssl_client_cert}') or ClientKeyFile ('{self.fix_ssl_client_key}') not found.")
+
+
         # Account settings
         self.account_username = self.get_setting('ACCOUNT', 'Username', fallback=None) # Optional
         self.account_password = self.get_setting('ACCOUNT', 'Password', fallback=None) # Optional
@@ -69,21 +87,43 @@ class AppSettings:
         self.app_log_level = self.get_setting('APPLICATION', 'LogLevel', fallback='INFO').upper()
         self.app_log_file = self.get_setting('APPLICATION', 'LogFile', fallback='logs/app.log')
         
-        # Ensure log directory exists if LogFile is specified
-        if self.app_log_file:
-            log_dir = os.path.dirname(self.app_log_file)
-            # If log_dir is empty, it means LogFile is in the current dir or just a filename.
-            # If it's relative, make it relative to project root.
-            if not os.path.isabs(log_dir) and log_dir:
-                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                log_dir = os.path.join(project_root, log_dir)
+        # Sequence Number File Path from FIX_SERVER or APPLICATION section
+        # Preferring FIX_SERVER section for things directly related to the FIX connection state.
+        self.app_seq_num_file_path = self.get_setting('FIX_SERVER', 'SeqNumFilePath', fallback='data/sequence_numbers.dat')
 
-            if log_dir and not os.path.exists(log_dir):
-                try:
-                    os.makedirs(log_dir, exist_ok=True)
-                    logger.info(f"Created log directory: {log_dir}")
-                except OSError as e:
-                    logger.warning(f"Could not create log directory '{log_dir}': {e}")
+        # Ensure directories for LogFile and SeqNumFilePath exist
+        self._ensure_directory_exists_for_file(self.app_log_file, "log")
+        self._ensure_directory_exists_for_file(self.app_seq_num_file_path, "sequence number data")
+
+
+    def _ensure_directory_exists_for_file(self, file_path, file_description=""):
+        """Helper function to create directory for a given file path if it doesn't exist."""
+        if not file_path:
+            logger.debug(f"No file path provided for {file_description}, skipping directory check.")
+            return
+
+        dir_name = os.path.dirname(file_path)
+        
+        # If dir_name is empty, it means the file is intended for the current/root directory.
+        # If it's relative, make it relative to project root.
+        if not os.path.isabs(dir_name) and dir_name:
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            # If file_path was already made absolute by logger_setup or similar, this might be redundant
+            # but it's safer to ensure dir_name is correctly pathed.
+            # Check if file_path itself is absolute first.
+            if not os.path.isabs(file_path):
+                 resolved_file_path = os.path.join(project_root, file_path)
+                 dir_name = os.path.dirname(resolved_file_path)
+            else: # file_path is already absolute
+                 dir_name = os.path.dirname(file_path)
+
+
+        if dir_name and not os.path.exists(dir_name):
+            try:
+                os.makedirs(dir_name, exist_ok=True)
+                logger.info(f"Created directory for {file_description}: {dir_name}")
+            except OSError as e:
+                logger.warning(f"Could not create directory '{dir_name}' for {file_description}: {e}")
 
 
     def get_setting(self, section, key, fallback=configparser._UNSET, required=False):
@@ -177,10 +217,16 @@ LogFile = logs/example_app.log
         logger.info(f"  SenderCompID: {settings.fix_sender_comp_id}")
         logger.info(f"  TargetCompID: {settings.fix_target_comp_id}")
         logger.info(f"  Heartbeat Interval: {settings.fix_heartbeat_interval}s")
+        logger.info(f"  Use SSL: {settings.fix_use_ssl}")
+        if settings.fix_use_ssl:
+            logger.info(f"    CA Certs: {settings.fix_ssl_ca_certs or 'Not set'}")
+            logger.info(f"    Client Cert: {settings.fix_ssl_client_cert or 'Not set'}")
+            logger.info(f"    Client Key: {settings.fix_ssl_client_key or 'Not set'}")
         logger.info(f"  Username: {settings.account_username}")
         logger.info(f"  Password: {'********' if settings.account_password else 'Not set'}")
         logger.info(f"  Log Level: {settings.app_log_level}")
         logger.info(f"  Log File: {settings.app_log_file}")
+        logger.info(f"  SeqNum File Path: {settings.app_seq_num_file_path}")
 
         # Test missing optional value (assuming Password is not in dummy_config_content)
         logger.info(f"  Account Password (raw): {settings.account_password}")

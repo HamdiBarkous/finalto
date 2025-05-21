@@ -2,9 +2,9 @@ name: Python Application CI
 
 on:
   push:
-    branches: [ "main", "master" ] # Catches pushes to either main or master
+    branches: [ "*" ]  # Run on push to any branch
   pull_request:
-    branches: [ "main", "master" ] # Catches PRs targeting either main or master
+    branches: [ "*" ]  # Run on PR to any branch
 
 jobs:
   build-and-test:
